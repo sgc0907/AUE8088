@@ -206,13 +206,14 @@ class ComputeLoss:
         targets = torch.cat((targets.repeat(na, 1, 1), ai[..., None]), 2)  # append anchor indices
 
         # --- IGNORE CLASS LOGIC START ---
-        ignore_class_ids = torch.tensor([2, 3], device=targets.device)
+        # 1. Define ignore class IDs (customize as needed)
+        ignore_class_ids = torch.tensor([2, 3], device=targets.device)  # example: ignore class 2 and 3
+        # 2. Identify ignore targets
         if nt > 0:
-            targets_flat = targets.reshape(-1, targets.shape[-1])
-            ignore_targets_mask = torch.isin(targets_flat[:, 1], ignore_class_ids)
-            ignore_targets = targets_flat[ignore_targets_mask]
+            ignore_targets_mask = torch.isin(targets[:, 1], ignore_class_ids)
+            ignore_targets = targets[ignore_targets_mask]
         else:
-            ignore_targets = torch.empty((0, targets.shape[-1]), device=targets.device)
+            ignore_targets = torch.empty((0, targets.shape[1]), device=targets.device)
         # --- IGNORE CLASS LOGIC END ---
 
         g = 0.5  # bias
