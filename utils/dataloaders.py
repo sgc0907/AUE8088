@@ -1095,7 +1095,7 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         super().__init__(path, **kwargs)
 
         # TODO: make mosaic augmentation work
-        self.mosaic = False
+        self.mosaic = True
 
         # Set ignore flag
         cond = self.ignore_settings['train' if is_train else 'test']
@@ -1193,6 +1193,7 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
             if not f.exists():
                 np.save(f.as_posix(), cv2.imread(self.im_files[i].format(m)))
 
+    '''
     def __getitem__(self, index):
         """Fetches the dataset item at the given index, considering linear, shuffled, or weighted sampling."""
         index = self.indices[index]  # linear, shuffled, or image_weights
@@ -1200,8 +1201,6 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp["mosaic"]
         if mosaic:
-            raise NotImplementedError('Please make "mosaic" augmentation work!')
-
             # TODO: Load mosaic
             img, labels = self.load_mosaic(index)
             shapes = None
@@ -1227,30 +1226,15 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                     labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
                 if self.augment:
-                    
-                    if random.random() < hyp["flipud"]:             # 추가 
-                        lwir_img = np.flipud(lwir_img)
-                        vis_img = np.flipud(vis_img)
-                        if len(labels):
-                            labels[:, 2] = vis_img.shape[0] - labels[:, 2] # y-좌표 반전
-                            labels[:, 4] = vis_img.shape[0] - labels[:, 4]
-
-                    # 좌우 반전 (Flip left-right)
                     if random.random() < hyp["fliplr"]:
-                        lwir_img = np.fliplr(lwir_img)
-                        vis_img = np.fliplr(vis_img)
+                        img_lwir = np.fliplr(img_lwir)
+                        img_vis = np.fliplr(img_vis)
                         if len(labels):
-                            labels[:, 1] = vis_img.shape[1] - labels[:, 1] # x-좌표 반전
-                            labels[:, 3] = vis_img.shape[1] - labels[:, 3]
-                    if self.albumentations:
-                        try:
-                            vis_img, labels = self.albumentations(image=vis_img, bboxes=labels)
-                        except Exception:
-                            # 일부 변환은 라벨 포맷과 호환되지 않을 수 있음
-                            pass
+                            x1 = labels[:, 1].copy()
+                            labels[:, 1] = img_vis.shape[1] - labels[:, 3]
+                            labels[:, 3] = img_vis.shape[1] - x1
 
-                    # HSV 색 공간 변환
-                    augment_hsv(vis_img, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
+                    augment_hsv(img_vis, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
 
                             
                 nl = len(labels)  # number of labels
@@ -1281,6 +1265,8 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                     # labels = cutout(img, labels, p=0.5)
                     # nl = len(labels)  # update after cutout
 
+
+
                 labels_out = torch.zeros((nl, 7))
                 if nl:
                     labels_out[:, 1:] = torch.from_numpy(labels)
@@ -1294,6 +1280,170 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         # Drop occlusion level
         labels_out = labels_out[:, :-1]
         return imgs, labels_out, self.im_files[index], shapes, index
+    '''
+
+
+    def __getitem__(self, index):
+        """
+        Main method to fetch and augment an RGBT data sample.
+        This method handles both mosaic and standard augmentation pipelines, applying transformations
+        consistently across both LWIR and Visible modalities.
+        """
+        index = self.indices[index]
+        hyp = self.hyp
+        
+        # Determine if mosaic augmentation should be applied
+        mosaic = self.mosaic and random.random() < hyp["mosaic"]
+        
+        if mosaic:
+            # --- RGBT Mosaic Augmentation ---
+            # This logic is self-contained and does not call the incompatible parent 'load_mosaic'
+            # 1. Create large mosaic canvases (lwir, vis) and load 4 image pairs
+            s = self.img_size
+            mosaic_border = self.mosaic_border
+            yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in mosaic_border)  # mosaic center x, y
+            
+            # Select 3 additional random image indices
+            indices = [index] + random.choices(self.indices, k=3)
+            
+            labels4 = []
+            img4_lwir = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
+            img4_vis = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
+
+            # 2. Build mosaic by placing 4 image pairs
+            for i, idx in enumerate(indices):
+                # Load RGBT image pair. load_image returns a list of two images.
+                (img_lwir, img_vis), _, hws = self.load_image(idx)
+                # Use visible image's shape as the reference
+                h, w = hws[1]
+
+                # Place image in mosaic
+                if i == 0:  # top left
+                    x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+                    x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+                elif i == 1:  # top right
+                    x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+                    x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+                elif i == 2:  # bottom left
+                    x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
+                    x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+                elif i == 3:  # bottom right
+                    x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
+                    x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+
+                # Paste images into their respective mosaic canvases
+                img4_lwir[y1a:y2a, x1a:x2a] = img_lwir[y1b:y2b, x1b:x2b]
+                img4_vis[y1a:y2a, x1a:x2a] = img_vis[y1b:y2b, x1b:x2b]
+                padw = x1a - x1b
+                padh = y1a - y1b
+
+                # Transform labels
+                labels = self.labels[idx].copy()
+                if labels.size:
+                    # KAIST labels are (class, x_lt, y_lt, w, h, occ), already normalized
+                    # Convert to center-based xywh, then to pixel-based xyxy
+                    labels[:, 1:3] += labels[:, 3:5] / 2.0
+                    labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)
+                labels4.append(labels)
+
+            # 3. Concatenate labels and apply geometric augmentations to the mosaic
+            labels4 = np.concatenate(labels4, 0)
+            np.clip(labels4[:, 1:], 0, 2 * s, out=labels4[:, 1:])
+
+            # Apply a single, consistent perspective transform to BOTH mosaic images and labels
+            img4_vis, labels4 = random_perspective(img4_vis, labels4, segments=[], degrees=hyp['degrees'],
+                                                   translate=hyp['translate'], scale=hyp['scale'], shear=hyp['shear'],
+                                                   perspective=hyp['perspective'], border=mosaic_border)
+            
+            img4_lwir, _ = random_perspective(img4_lwir, labels4, segments=[], degrees=hyp['degrees'],
+                                              translate=hyp['translate'], scale=hyp['scale'], shear=hyp['shear'],
+                                              perspective=hyp['perspective'], border=mosaic_border)
+            
+            # Set shapes for mosaic augmentation
+            h, w = img4_vis.shape[:2]
+            shapes = (h, w), ((1, 1), (0, 0))  # (original hw), (ratio, padding)
+            final_img_lwir = img4_lwir
+            final_img_vis = img4_vis
+            final_labels = labels4
+            
+            # 4. Optional: Apply MixUp augmentation
+            if random.random() < hyp["mixup"]:
+                (mix_lwir, mix_vis), mix_labels = self.__getitem__(random.choice(self.indices))[:2]
+                final_img_lwir, final_labels = mixup(final_img_lwir, final_labels, mix_lwir, mix_labels)
+                final_img_vis, _ = mixup(final_img_vis, final_labels, mix_vis, mix_labels)
+
+        else:
+            # --- Standard Augmentation ---
+            # 1. Load a single RGBT image pair
+            (img_lwir, img_vis), h0s, hws = self.load_image(index)
+            (h0, w0), (h, w) = h0s[1], hws[1]
+
+            # 2. Apply letterbox to both images consistently
+            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size
+            img_lwir, ratio, pad = letterbox(img_lwir, shape, auto=False, scaleup=self.augment)
+            img_vis, _, _ = letterbox(img_vis, shape, auto=False, scaleup=self.augment)
+            shapes = (h0, w0), ((h / h0, w / w0), pad)
+
+            # 3. Load labels and convert from normalized xywh to pixel xyxy
+            labels = self.labels[index].copy()
+            if labels.size:
+                labels[:, 1:3] += labels[:, 3:5] / 2.0
+                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+
+            # 4. Apply geometric augmentations
+            if self.augment:
+                img_vis, labels = random_perspective(img_vis, labels, segments=[], degrees=hyp['degrees'],
+                                                     translate=hyp['translate'], scale=hyp['scale'],
+                                                     shear=hyp['shear'], perspective=hyp['perspective'])
+                img_lwir, _ = random_perspective(img_lwir, labels, segments=[], degrees=hyp['degrees'],
+                                                 translate=hyp['translate'], scale=hyp['scale'],
+                                                 shear=hyp['shear'], perspective=hyp['perspective'])
+
+            final_img_lwir = img_lwir
+            final_img_vis = img_vis
+            final_labels = labels
+
+        # --- Common Post-Processing for both Mosaic and Standard ---
+        # 5. Apply Color-Space and other augmentations
+        if self.augment:
+            if self.albumentations:
+                final_img_vis, final_labels = self.albumentations(final_img_vis, final_labels)
+
+            augment_hsv(final_img_vis, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
+
+            if random.random() < hyp['fliplr']:
+                final_img_lwir = np.fliplr(final_img_lwir)
+                final_img_vis = np.fliplr(final_img_vis)
+                if len(final_labels):
+                    x1 = final_labels[:, 1].copy()
+                    x2 = final_labels[:, 3].copy()
+                    final_labels[:, 1] = final_img_vis.shape[1] - x2
+                    final_labels[:, 3] = final_img_vis.shape[1] - x1
+
+        # 6. Normalize labels to xywhn format
+        nl = len(final_labels)
+        if nl:
+            final_labels_xywh = xyxy2xywhn(final_labels[:, 1:6], w=final_img_vis.shape[1], h=final_img_vis.shape[0], clip=True, eps=1e-3)
+            final_labels = np.concatenate((final_labels[:, 0:1], final_labels_xywh), axis=1)
+
+        # 7. Prepare final output tensors
+        labels_out = torch.zeros((nl, 6))
+        if nl:
+            labels_out[:, 1:] = torch.from_numpy(final_labels[:, :5])
+        
+        # Convert images from HWC to CHW, BGR to RGB
+        final_img_lwir = np.ascontiguousarray(final_img_lwir.transpose((2, 0, 1))[::-1])
+        final_img_vis = np.ascontiguousarray(final_img_vis.transpose((2, 0, 1))[::-1])
+
+        imgs_out = [torch.from_numpy(final_img_lwir), torch.from_numpy(final_img_vis)]
+        
+        return imgs_out, labels_out, self.im_files[index], shapes, index
+
+
+
+
+
+
 
     def load_image(self, i):
         """
@@ -1309,10 +1459,41 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
 
         if any(img is None for img in imgs):  # not cached in RAM
             if all(fn.exists() for fn in fns):  # load npy
-                imgs = [np.load(fn) for fn in fns]
+                try:
+                    imgs = [np.load(fn) for fn in fns]
+                except Exception as e:
+                    error_msg = f"Failed to load NPY files for {f}:\n"
+                    for fn in fns:
+                        if not fn.exists():
+                            error_msg += f"- File not found: {fn}\n"
+                        else:
+                            error_msg += f"- Failed to load: {fn}\n"
+                    error_msg += f"Error: {str(e)}"
+                    LOGGER.error(error_msg)
+                    raise RuntimeError(error_msg)
             else:  # read image
-                imgs = [cv2.imread(f.format(m)) for m in self.modalities]  # BGR
-                assert all(img is not None for img in imgs), f"Image Not Found {f}"
+                failed_modalities = []
+                loaded_imgs = []
+                
+                for m in self.modalities:
+                    img_path = f.format(m)
+                    if not os.path.exists(img_path):
+                        failed_modalities.append(f"{m} (file not found: {img_path})")
+                        continue
+                    
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        failed_modalities.append(f"{m} (failed to read: {img_path})")
+                        continue
+                        
+                    loaded_imgs.append(img)
+                
+                if failed_modalities:
+                    error_msg = f"Image loading failed for {f}:\n" + "\n".join(failed_modalities)
+                    LOGGER.error(error_msg)
+                    raise RuntimeError(error_msg)
+                
+                imgs = loaded_imgs
 
             h0s, w0s = [], []
             img_shapes = []

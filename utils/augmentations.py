@@ -333,7 +333,7 @@ def classify_albumentations(
     jitter=0.4,
     mean=IMAGENET_MEAN,
     std=IMAGENET_STD,
-    auto_aug=False,
+    auto_aug=None,
 ):
     # YOLOv5 classification Albumentations (optional, only used if package is installed)
     prefix = colorstr("albumentations: ")
@@ -344,9 +344,13 @@ def classify_albumentations(
         check_version(A.__version__, "1.0.3", hard=True)  # version requirement
         if augment:  # Resize and crop
             T = [A.RandomResizedCrop(height=size, width=size, scale=scale, ratio=ratio)]
-            if auto_aug:
-                # TODO: implement AugMix, AutoAug & RandAug in albumentation
-                LOGGER.info(f"{prefix}auto augmentations are currently not supported")
+            if auto_aug:    # TODO: implement AugMix, AutoAug & RandAug in albumentation
+                if auto_aug == "randaug":
+                    T.append(A.RandAugment(n=2, m=9))
+                elif auto_aug == "autoaug":
+                    T.append(A.AutoAugment(policy="imagenet"))
+                elif auto_aug == "augmix":
+                    T.append(A.AugMix(severity=3, width=3, p=1.0))
             else:
                 if hflip > 0:
                     T += [A.HorizontalFlip(p=hflip)]
