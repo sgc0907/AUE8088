@@ -1227,18 +1227,32 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                     labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
                 if self.augment:
-                    raise NotImplementedError('Please make data augmentation work!')
+                    
+                    if random.random() < hyp["flipud"]:             # 추가 
+                        lwir_img = np.flipud(lwir_img)
+                        vis_img = np.flipud(vis_img)
+                        if len(labels):
+                            labels[:, 2] = vis_img.shape[0] - labels[:, 2] # y-좌표 반전
+                            labels[:, 4] = vis_img.shape[0] - labels[:, 4]
 
-                    img, labels = random_perspective(
-                        img,
-                        labels,
-                        degrees=hyp["degrees"],
-                        translate=hyp["translate"],
-                        scale=hyp["scale"],
-                        shear=hyp["shear"],
-                        perspective=hyp["perspective"],
-                    )
+                    # 좌우 반전 (Flip left-right)
+                    if random.random() < hyp["fliplr"]:
+                        lwir_img = np.fliplr(lwir_img)
+                        vis_img = np.fliplr(vis_img)
+                        if len(labels):
+                            labels[:, 1] = vis_img.shape[1] - labels[:, 1] # x-좌표 반전
+                            labels[:, 3] = vis_img.shape[1] - labels[:, 3]
+                    if self.albumentations:
+                        try:
+                            vis_img, labels = self.albumentations(image=vis_img, bboxes=labels)
+                        except Exception:
+                            # 일부 변환은 라벨 포맷과 호환되지 않을 수 있음
+                            pass
 
+                    # HSV 색 공간 변환
+                    augment_hsv(vis_img, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
+
+                            
                 nl = len(labels)  # number of labels
                 if nl:
                     labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1e-3)
