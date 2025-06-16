@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import yaml
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,7 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
+from models.experimental import attempt_load
 from utils.callbacks import Callbacks
 from utils.dataloaders import create_dataloader
 from utils.general import (
@@ -149,6 +151,8 @@ def run(
     callbacks=Callbacks(),
     compute_loss=None,
     epoch=None,
+    rgbt=False,
+    hyp=None,
 ):
     # Initialize/load model and set device
     training = model is not None
@@ -164,17 +168,26 @@ def run(
         (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
-        model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
-        stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
-        imgsz = check_img_size(imgsz, s=stride)  # check image size
-        half = model.fp16  # FP16 supported on limited backends with CUDA
-        if engine:
-            batch_size = model.batch_size
+        if rgbt:
+            model = attempt_load(weights, device=device, fuse=True)  # RGBT 모델은 직접 로드
+            stride = int(model.stride.max())
+            pt, jit, engine = True, False, False  # PyTorch 모델 플래그 설정
+            imgsz = check_img_size(imgsz, s=stride)
+            half &= device.type != 'cpu'
+            if half:
+                model.half()
         else:
-            device = model.device
-            if not (pt or jit):
-                batch_size = 1  # export.py models default to batch-size 1
-                LOGGER.info(f"Forcing --batch-size 1 square inference (1,3,{imgsz},{imgsz}) for non-PyTorch models")
+            model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)  # 일반 모델 로드
+            stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+            imgsz = check_img_size(imgsz, s=stride)  # check image size
+            half = model.fp16  # FP16 supported on limited backends with CUDA
+            if engine:
+                batch_size = model.batch_size
+            else:
+                device = model.device
+                if not (pt or jit):
+                    batch_size = 1  # export.py models default to batch-size 1
+                    LOGGER.info(f"Forcing --batch-size 1 square inference (1,3,{imgsz},{imgsz}) for non-PyTorch models")
 
         # Data
         data = check_dataset(data)  # check
@@ -190,14 +203,25 @@ def run(
     # Dataloader
     if not training:
         if pt and not single_cls:  # check --weights are trained on --data
-            ncm = model.model.nc
-            assert ncm == nc, (
-                f"{weights} ({ncm} classes) trained on different --data than what you passed ({nc} "
-                f"classes). Pass correct combination of --weights and --data that are trained together."
-            )
-        model.warmup(imgsz=(1 if pt else batch_size, 3, imgsz, imgsz))  # warmup
-        pad, rect = (0.0, False) if task == "speed" else (0.5, pt)  # square inference for benchmarks
+            # RGBT 모델은 nc가 하드코딩 되어있을 수 있으므로 이 체크를 건너뜀
+            if not rgbt:
+                ncm = model.model.nc
+                assert ncm == nc, (
+                    f"{weights} ({ncm} classes) trained on different --data than what you passed ({nc} "
+                    f"classes). Pass correct combination of --weights and --data that are trained together."
+                )
+        if not rgbt:
+            model.warmup(imgsz=(1 if pt else batch_size, 3, imgsz, imgsz))  # warmup
+        
+        # KAIST val에서는 rect=False여야 함
+        pad, rect = (0.0, False) if task == "speed" else (0.5, False)
         task = task if task in ("train", "val", "test") else "val"  # path to train/val/test images
+        
+        # hyp 파일 읽기
+        if isinstance(hyp, (str, Path)):
+            with open(hyp, errors="ignore") as f:
+                hyp = yaml.safe_load(f)
+
         dataloader = create_dataloader(
             data[task],
             imgsz,
@@ -208,6 +232,8 @@ def run(
             rect=rect,
             workers=workers,
             prefix=colorstr(f"{task}: "),
+            rgbt_input=rgbt,
+            hyp=hyp,
         )[0]
 
     seen = 0
@@ -257,7 +283,9 @@ def run(
             )
 
         if isinstance(ims, list):
-            ims = ims[0]    # thermal image
+            ims_plot = ims[0]    # thermal image
+        else:
+            ims_plot = ims
 
         # Metrics
         for si, pred in enumerate(preds):
@@ -279,12 +307,12 @@ def run(
             if single_cls:
                 pred[:, 5] = 0
             predn = pred.clone()
-            scale_boxes(ims[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
+            scale_boxes(ims_plot[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
 
             # Evaluate
             if nl:
                 tbox = xywh2xyxy(labels[:, 1:5])  # target boxes
-                scale_boxes(ims[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
+                scale_boxes(ims_plot[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
                 labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels
                 correct = process_batch(predn, labelsn, iouv)
                 if plots:
@@ -297,13 +325,13 @@ def run(
                 save_one_txt(predn, save_conf, shape, file=save_dir / "labels" / f"{path.stem}.txt")
             if save_json:
                 save_one_json(predn, jdict, path, index, class_map)  # append to COCO-JSON dictionary
-            callbacks.run("on_val_image_end", pred, predn, path, names, ims[si])
+            callbacks.run("on_val_image_end", pred, predn, path, names, ims_plot[si])
 
         # Plot images
         if plots and batch_i < 3:
             desc = f"val_batch{batch_i}" if epoch is None else f"val_epoch{epoch}_batch{batch_i}"
-            plot_images(ims, targets, paths, save_dir / f"{desc}_labels.jpg", names)  # labels
-            plot_images(ims, output_to_target(preds), paths, save_dir / f"{desc}_pred.jpg", names)  # pred
+            plot_images(ims_plot, targets, paths, save_dir / f"{desc}_labels.jpg", names)  # labels
+            plot_images(ims_plot, output_to_target(preds), paths, save_dir / f"{desc}_pred.jpg", names)  # pred
 
         callbacks.run("on_val_batch_end", batch_i, ims, targets, paths, shapes, preds)
 
@@ -313,11 +341,16 @@ def run(
         tp, fp, p, r, f1, ap, ap_class = ap_per_class(*stats, plot=False, save_dir=save_dir, names=names)
         ap50, ap = ap[:, 0], ap.mean(1)  # AP@0.5, AP@0.5:0.95
         mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
-
+    else:
+        mp, mr, map50, map, f1 = 0.0, 0.0, 0.0, 0.0, 0.0
+        
     # filter out ignore labels when counting the number of gt boxes
-    lbls = stats[3].astype(int)
-    lbls = lbls[lbls >= 0]
-    nt = np.bincount(lbls, minlength=nc)  # number of targets per class
+    if len(stats):
+        lbls = stats[3].astype(int)
+        lbls = lbls[lbls >= 0]
+        nt = np.bincount(lbls, minlength=nc)  # number of targets per class
+    else:
+        nt = np.zeros(nc)
 
     # Print results
     pf = "%22s" + "%11i" * 2 + "%11.3g" * 4  # print format
@@ -326,7 +359,7 @@ def run(
         LOGGER.warning(f"WARNING ⚠️ no labels found in {task} set, can not compute metrics without labels")
 
     # Print results per class
-    if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
+    if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats) and stats[0].any():
         for i, c in enumerate(ap_class):
             LOGGER.info(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 
@@ -370,9 +403,14 @@ def run(
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ""
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    maps = np.zeros(nc) + map
-    for i, c in enumerate(ap_class):
-        maps[c] = ap[i]
+    
+    if len(stats) and stats[0].any():
+        maps = np.zeros(nc) + map
+        for i, c in enumerate(ap_class):
+            maps[c] = ap[i]
+    else:
+        maps = np.zeros(nc)
+
     return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
 
 
@@ -390,6 +428,7 @@ def parse_opt():
     parser.add_argument("--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
     parser.add_argument("--workers", type=int, default=8, help="max dataloader workers (per RANK in DDP mode)")
     parser.add_argument("--single-cls", action="store_true", help="treat as single-class dataset")
+    parser.add_argument("--rgbt", action="store_true", help="test RGBT model")
     parser.add_argument("--augment", action="store_true", help="augmented inference")
     parser.add_argument("--verbose", action="store_true", help="report mAP by class")
     parser.add_argument("--save-txt", action="store_true", help="save results to *.txt")
@@ -401,6 +440,7 @@ def parse_opt():
     parser.add_argument("--exist-ok", action="store_true", help="existing project/name ok, do not increment")
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
+    parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith("coco.yaml")

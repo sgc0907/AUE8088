@@ -1,7 +1,7 @@
 CUDA_VISIBLE_DEVICES=2 python3 train_simple.py \
   --img 640 \
-  --batch-size 16 \
-  --epochs 20 \
+  --batch-size 32 \
+  --epochs 100 \
   --data data/kaist-rgbt.yaml \
   --cfg models/yolov5n_kaist-rgbt.yaml \
   --weights yolov5n.pt \
@@ -9,4 +9,4 @@ CUDA_VISIBLE_DEVICES=2 python3 train_simple.py \
   --name yolov5n-rgbt \
   --entity $WANDB_ENTITY \
   --rgbt \
-  --single-cls
+  --single-cls 
