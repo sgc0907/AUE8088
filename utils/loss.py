@@ -3,7 +3,9 @@
 
 import torch
 import torch.nn as nn
+import numpy as np
 
+from utils.general import xywh2xyxy
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
 
@@ -109,6 +111,8 @@ class ComputeLoss:
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
+        self.ignore_cls = [2, 3]
+        
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["cls_pw"]], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["obj_pw"]], device=device))
@@ -137,6 +141,11 @@ class ComputeLoss:
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
         tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
+
+        isin_mask = torch.zeros_like(targets[:, 1], dtype=torch.bool)
+        for cls in self.ignore_cls:
+            isin_mask |= (targets[:, 1] == cls)
+        ignore_targets = targets[isin_mask]
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
@@ -205,15 +214,17 @@ class ComputeLoss:
         ai = torch.arange(na, device=self.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
         targets = torch.cat((targets.repeat(na, 1, 1), ai[..., None]), 2)  # append anchor indices
 
-        # --- IGNORE CLASS LOGIC START ---
-        ignore_class_ids = torch.tensor([2, 3], device=targets.device)
-        if nt > 0:
-            targets_flat = targets.reshape(-1, targets.shape[-1])
-            ignore_targets_mask = torch.isin(targets_flat[:, 1], ignore_class_ids)
-            ignore_targets = targets_flat[ignore_targets_mask]
+
+        # ignore class logic
+        ignore_cls_indices = self.hyp.get('ignore_cls', [])
+        if ignore_cls_indices:
+            isin_mask = torch.zeros_like(targets[0, :, 1], dtype=torch.bool)
+            for cls in ignore_cls_indices:
+                isin_mask |= (targets[0, :, 1] == cls)
+            ignore_targets = targets[0, isin_mask]
         else:
-            ignore_targets = torch.empty((0, targets.shape[-1]), device=targets.device)
-        # --- IGNORE CLASS LOGIC END ---
+            ignore_targets = torch.empty(0, 7, device=targets.device)
+
 
         g = 0.5  # bias
         off = (
@@ -261,28 +272,18 @@ class ComputeLoss:
             gij = (gxy - offsets).long()
             gi, gj = gij.T  # grid indices
 
-            # --- IGNORE MASK LOGIC PER LAYER ---
-            # For each anchor, check if it should be ignored due to IoU with ignore targets
-            ignore_mask = None
+            keep = torch.ones(b.shape[0], device=b.device, dtype=torch.bool)
+
             if ignore_targets.shape[0] > 0:
-                # Prepare anchor boxes in xywh (normalized to grid)
-                anchor_boxes = torch.cat([
-                    gxy,  # center x, y
-                    gwh   # width, height
-                ], dim=1)  # shape: (num_matched, 4)
-                # ignore_targets: (num_ignore, 7), columns: [img, cls, x, y, w, h, anchor_idx]
-                ignore_boxes = ignore_targets[:, 2:6] * gain[2:6]  # scale ignore boxes to grid
-                # Compute IoU between each anchor box and each ignore box
-                ious = bbox_iou(anchor_boxes, ignore_boxes, CIoU=False)  # (num_matched, num_ignore)
-                # Mark as ignore if any IoU > threshold
+                matched_boxes_xywh = torch.cat((gxy, gwh), 1)
+                ignore_boxes_xywh = ignore_targets[:, 2:6] * gain[2:6]
+                ious = bbox_iou(xywh2xyxy(matched_boxes_xywh), xywh2xyxy(ignore_boxes_xywh), CIoU=False)
+
                 ignore_iou_thresh = self.hyp.get('ignore_iou_thresh', 0.5)
-                ignore_mask = (ious > ignore_iou_thresh).any(dim=1)  # (num_matched,)
-            else:
-                ignore_mask = torch.zeros_like(b, dtype=torch.bool)
-            # Remove ignored anchors from assignment
-            keep = ~ignore_mask
-            b, a, gj, gi, gxy, gwh, c = b[keep], a[keep], gj[keep], gi[keep], gxy[keep], gwh[keep], c[keep]
-            # --- END IGNORE MASK LOGIC ---
+                keep = (ious > ignore_iou_thresh).any(dim=1).logical_not()
+
+            b, c, gxy, gwh, gij, t, offsets = \
+                b[keep], c[keep], gxy[keep], gwh[keep], gij[keep], t[keep], offsets[keep]
 
             # Append
             indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid

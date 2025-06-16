@@ -81,8 +81,8 @@ def save_one_json(predn, jdict, path, index, class_map):
     box = xyxy2xywh(predn[:, :4])  # xywh
     box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
     for p, b in zip(predn.tolist(), box.tolist()):
-        if p[4] < 0.1:
-            continue
+        # if p[4] < 0.1:
+        #     continue
         jdict.append(
             {
                 "image_name": image_id,

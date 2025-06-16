@@ -1282,7 +1282,6 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         return imgs, labels_out, self.im_files[index], shapes, index
     '''
 
-
     def __getitem__(self, index):
         """
         Main method to fetch and augment an RGBT data sample.
@@ -1292,32 +1291,23 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         index = self.indices[index]
         hyp = self.hyp
         
-        # Determine if mosaic augmentation should be applied
         mosaic = self.mosaic and random.random() < hyp["mosaic"]
         
         if mosaic:
-            # --- RGBT Mosaic Augmentation ---
-            # This logic is self-contained and does not call the incompatible parent 'load_mosaic'
-            # 1. Create large mosaic canvases (lwir, vis) and load 4 image pairs
             s = self.img_size
             mosaic_border = self.mosaic_border
             yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in mosaic_border)  # mosaic center x, y
             
-            # Select 3 additional random image indices
             indices = [index] + random.choices(self.indices, k=3)
             
             labels4 = []
             img4_lwir = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
             img4_vis = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
 
-            # 2. Build mosaic by placing 4 image pairs
             for i, idx in enumerate(indices):
-                # Load RGBT image pair. load_image returns a list of two images.
                 (img_lwir, img_vis), _, hws = self.load_image(idx)
-                # Use visible image's shape as the reference
                 h, w = hws[1]
 
-                # Place image in mosaic
                 if i == 0:  # top left
                     x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
                     x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
@@ -1331,26 +1321,20 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                     x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
                     x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
 
-                # Paste images into their respective mosaic canvases
                 img4_lwir[y1a:y2a, x1a:x2a] = img_lwir[y1b:y2b, x1b:x2b]
                 img4_vis[y1a:y2a, x1a:x2a] = img_vis[y1b:y2b, x1b:x2b]
                 padw = x1a - x1b
                 padh = y1a - y1b
 
-                # Transform labels
                 labels = self.labels[idx].copy()
                 if labels.size:
-                    # KAIST labels are (class, x_lt, y_lt, w, h, occ), already normalized
-                    # Convert to center-based xywh, then to pixel-based xyxy
                     labels[:, 1:3] += labels[:, 3:5] / 2.0
                     labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)
                 labels4.append(labels)
 
-            # 3. Concatenate labels and apply geometric augmentations to the mosaic
             labels4 = np.concatenate(labels4, 0)
             np.clip(labels4[:, 1:], 0, 2 * s, out=labels4[:, 1:])
 
-            # Apply a single, consistent perspective transform to BOTH mosaic images and labels
             img4_vis, labels4 = random_perspective(img4_vis, labels4, segments=[], degrees=hyp['degrees'],
                                                    translate=hyp['translate'], scale=hyp['scale'], shear=hyp['shear'],
                                                    perspective=hyp['perspective'], border=mosaic_border)
@@ -1359,38 +1343,31 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                                               translate=hyp['translate'], scale=hyp['scale'], shear=hyp['shear'],
                                               perspective=hyp['perspective'], border=mosaic_border)
             
-            # Set shapes for mosaic augmentation
             h, w = img4_vis.shape[:2]
             shapes = (h, w), ((1, 1), (0, 0))  # (original hw), (ratio, padding)
             final_img_lwir = img4_lwir
             final_img_vis = img4_vis
             final_labels = labels4
             
-            # 4. Optional: Apply MixUp augmentation
             if random.random() < hyp["mixup"]:
                 (mix_lwir, mix_vis), mix_labels = self.__getitem__(random.choice(self.indices))[:2]
                 final_img_lwir, final_labels = mixup(final_img_lwir, final_labels, mix_lwir, mix_labels)
                 final_img_vis, _ = mixup(final_img_vis, final_labels, mix_vis, mix_labels)
 
         else:
-            # --- Standard Augmentation ---
-            # 1. Load a single RGBT image pair
             (img_lwir, img_vis), h0s, hws = self.load_image(index)
             (h0, w0), (h, w) = h0s[1], hws[1]
 
-            # 2. Apply letterbox to both images consistently
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size
             img_lwir, ratio, pad = letterbox(img_lwir, shape, auto=False, scaleup=self.augment)
             img_vis, _, _ = letterbox(img_vis, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)
 
-            # 3. Load labels and convert from normalized xywh to pixel xyxy
             labels = self.labels[index].copy()
             if labels.size:
                 labels[:, 1:3] += labels[:, 3:5] / 2.0
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
-            # 4. Apply geometric augmentations
             if self.augment:
                 img_vis, labels = random_perspective(img_vis, labels, segments=[], degrees=hyp['degrees'],
                                                      translate=hyp['translate'], scale=hyp['scale'],
@@ -1403,8 +1380,7 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
             final_img_vis = img_vis
             final_labels = labels
 
-        # --- Common Post-Processing for both Mosaic and Standard ---
-        # 5. Apply Color-Space and other augmentations
+
         if self.augment:
             if self.albumentations:
                 final_img_vis, final_labels = self.albumentations(final_img_vis, final_labels)
@@ -1420,18 +1396,15 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
                     final_labels[:, 1] = final_img_vis.shape[1] - x2
                     final_labels[:, 3] = final_img_vis.shape[1] - x1
 
-        # 6. Normalize labels to xywhn format
         nl = len(final_labels)
         if nl:
             final_labels_xywh = xyxy2xywhn(final_labels[:, 1:6], w=final_img_vis.shape[1], h=final_img_vis.shape[0], clip=True, eps=1e-3)
             final_labels = np.concatenate((final_labels[:, 0:1], final_labels_xywh), axis=1)
 
-        # 7. Prepare final output tensors
         labels_out = torch.zeros((nl, 6))
         if nl:
             labels_out[:, 1:] = torch.from_numpy(final_labels[:, :5])
         
-        # Convert images from HWC to CHW, BGR to RGB
         final_img_lwir = np.ascontiguousarray(final_img_lwir.transpose((2, 0, 1))[::-1])
         final_img_vis = np.ascontiguousarray(final_img_vis.transpose((2, 0, 1))[::-1])
 
