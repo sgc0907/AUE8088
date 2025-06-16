@@ -13,4 +13,5 @@ python3 val.py \
     --name yolov5n-rgbt-val \
     --rgbt \
     --single-cls \
-    --task test
+    --task test \
+    --save-json
