@@ -74,9 +74,9 @@ def save_one_txt(predn, save_conf, shape, file):
 def save_one_json(predn, jdict, path, index, class_map):
     """
     Saves one JSON detection result with image ID, category ID, bounding box, and score.
-
     Example: {"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}
     """
+    # Ground Truth 생성 방식과 동일하게 파일명에서 고유 ID 추출
     img_name = path.stem
     try:
         set_id = int(img_name[3:5])
@@ -84,18 +84,16 @@ def save_one_json(predn, jdict, path, index, class_map):
         frame_id = int(img_name[12:])
         image_id = int(f"{set_id:02d}{vid_id:03d}{frame_id:05d}")
     except (ValueError, IndexError):
+        # KAIST 형식이 아닌 다른 이미지 파일일 경우를 위한 예외 처리
         image_id = int(index)
 
     box = xyxy2xywh(predn[:, :4])  # xywh
     box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
     for p, b in zip(predn.tolist(), box.tolist()):
-        if p[4] < 0.1:
-            continue
         jdict.append(
             {
-                "image_name": image_id,
-                "image_id": int(index),
-                "category_id": class_map[int(p[5])],
+                "image_id": image_id,
+                "category_id": int(p[5]) + 1,  # category_id를 1-based로 변경
                 "bbox": [round(x, 3) for x in b],
                 "score": round(p[4], 5),
             }
@@ -332,7 +330,7 @@ def run(
                 (save_dir / "labels").mkdir(parents=True, exist_ok=True)
                 save_one_txt(predn, save_conf, shape, file=save_dir / "labels" / f"{path.stem}.txt")
             if save_json:
-                save_one_json(predn, jdict, path, index, class_map)
+                save_one_json(predn, jdict, path, index, class_map)  # append to COCO-JSON dictionary
             callbacks.run("on_val_image_end", pred, predn, path, names, ims_plot[si])
 
         # Plot images

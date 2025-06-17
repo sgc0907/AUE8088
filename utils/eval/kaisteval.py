@@ -694,9 +694,9 @@ def draw_all(eval_results, filename='figure.jpg'):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='eval models')
-    parser.add_argument('--annFile', type=str, default='evaluation_script/KAIST_annotation.json',
+    parser.add_argument('--annFile', type=str, default='utils/eval/KAIST_annotation.json',
                         help='Please put the path of the annotation file. Only support json format.')
-    parser.add_argument('--rstFiles', type=str, nargs='+', default=['evaluation_script/MLPD_result.json'],
+    parser.add_argument('--rstFiles', type=str, nargs='+', default=['runs/val/yolov5s-rgbt-val6/best_predictions.json'],
                         help='Please put the path of the result file. Only support json, txt format.')
     parser.add_argument('--evalFig', type=str, default=None,
                         help='Please put the output path of the Miss rate versus false positive per-image (FPPI) curve')

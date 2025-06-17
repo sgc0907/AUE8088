@@ -272,18 +272,28 @@ class ComputeLoss:
             gij = (gxy - offsets).long()
             gi, gj = gij.T  # grid indices
 
-            keep = torch.ones(b.shape[0], device=b.device, dtype=torch.bool)
-
+            # --- IGNORE MASK LOGIC PER LAYER ---
+            # For each anchor, check if it should be ignored due to IoU with ignore targets
+            ignore_mask = torch.zeros(b.shape[0], device=b.device, dtype=torch.bool)
             if ignore_targets.shape[0] > 0:
-                matched_boxes_xywh = torch.cat((gxy, gwh), 1)
-                ignore_boxes_xywh = ignore_targets[:, 2:6] * gain[2:6]
-                ious = bbox_iou(xywh2xyxy(matched_boxes_xywh), xywh2xyxy(ignore_boxes_xywh), CIoU=False)
-
+                # Prepare anchor boxes in xywh (normalized to grid)
+                anchor_boxes = torch.cat([
+                    gxy,  # center x, y
+                    gwh   # width, height
+                ], dim=1)  # shape: (num_matched, 4)
+                # ignore_targets: (num_ignore, 7), columns: [img, cls, x, y, w, h, anchor_idx]
+                ignore_boxes = ignore_targets[:, 2:6] * gain[2:6]  # scale ignore boxes to grid
+                # Compute IoU between each anchor box and each ignore box
+                ious = bbox_iou(anchor_boxes, ignore_boxes, CIoU=False)  # (num_matched, num_ignore)
+                # Mark as ignore if any IoU > threshold
                 ignore_iou_thresh = self.hyp.get('ignore_iou_thresh', 0.5)
-                keep = (ious > ignore_iou_thresh).any(dim=1).logical_not()
+                ignore_mask = (ious > ignore_iou_thresh).any(dim=1)  # (num_matched,)
 
-            b, c, gxy, gwh, gij, t, offsets = \
-                b[keep], c[keep], gxy[keep], gwh[keep], gij[keep], t[keep], offsets[keep]
+            # Remove ignored anchors from assignment
+            keep = ~ignore_mask
+            if keep.numel() > 0:  # Only apply indexing if we have elements to keep
+                b, a, gj, gi, gxy, gwh, c = b[keep], a[keep], gj[keep], gi[keep], gxy[keep], gwh[keep], c[keep]
+            # --- END IGNORE MASK LOGIC ---
 
             # Append
             indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid

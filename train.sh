@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2 python3 train_simple.py \
+CUDA_VISIBLE_DEVICES=3 python3 train_simple.py \
   --img 640 \
   --batch-size 16 \
   --epochs 100 \
